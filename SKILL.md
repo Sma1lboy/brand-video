@@ -92,6 +92,15 @@ scratch/approved 目录看 `artifacts.*`。换一个产品 repo,换的是 metada
 双时钟、交付压缩与全套排错表。UI 迭代后重跑 capture 即可,视频自动跟上。
 捕获对象不限 TUI——任何可脚本化+截屏的 app 都行,只换"capture 原语"。
 
+**必须有 AI 可编辑 replay spec。** 每个 replay composition 放一份
+`src/<name>/<name>.replay.json`(或 yaml),作为 storyboard 的可执行投影:
+`viewport/capture/setup/waits/text/flows/beats/regions/stages/camera/delivery` 都在 spec 里。
+`regions[*].hash` 先由工具按 `region name + capture size + 坐标` 自动生成,再留在 spec 里给
+AI 修改/标注 self-eval;hash 不是引擎锁,而是 stale-region/人工判断的可读检查点。
+AI 调整视频默认只改这份 spec;`capture-*.ts`、renderer、camera engine 只保留通用执行原语
+(type/key/wait/flow/camera 算法/schema 校验)。只有新增原语或修 engine bug 才改 TS,并补测试。
+这条边界是为了避免 TUI/UI 改动把视频调参散落到脚本里,导致"自动化 replay"退化成人工修视频。
+
 ## Step 3 — 能力插槽(同一时间轴,按需挂载)
 
 - **bgm**:`<Audio src={staticFile("bgm.mp3")} volume={0.15} loop />` 作第二音轨;
@@ -139,6 +148,7 @@ ffprobe -v error -show_entries format=duration -of csv=p=0 out/<name>.mp4
 | ElevenLabs 402 paid_plan_required | 免费计划不能用 library voice | 先 GET /v1/voices,选 category=premade 的音色 |
 | 字体闪换/缺字 | 系统字体不确定 | `@remotion/google-fonts` 显式加载 |
 | replay 镜头过期 | UI 改了没重跑 capture | 重跑 capture 再 render,别手改 frames.json |
+| replay 产出不符合预期,需要改 TS 才能调 | storyboard/相机/时序硬编码在 engine | 抽到 `<name>.replay.json`;AI 只改 spec,再重跑 capture/render |
 | 相机框错主体/抖动 | region/权重没调对 | 按 replay-capture.md 的 tuning knobs 顺序调 |
 | 渲染时长对不上 | durationInFrames 拍脑袋 | 从 storyboard 总跨度(或 frames.json 末帧)推导 |
 

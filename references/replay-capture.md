@@ -17,7 +17,7 @@ ride the same pipeline:
   Step 3) with tighter camera work; energy matters, individual keystrokes don't.
 
 What the pipeline guarantees: **stability and normalization**. The output is
-deterministic given (frames.json, STAGES, speed) — no shaky hand, no missed
+deterministic given (frames.json, replay spec, speed) — no shaky hand, no missed
 click, no "the recording person's env leaked in" (given a clean profile). An
 asset regenerates with two commands when the product changes.
 
@@ -46,6 +46,52 @@ bun x remotion render src/index.ts <id> out/<id>.mp4   # 3. render
 
 Studio hot-reloads the camera/composition; `frames.json` only changes on re-capture.
 
+## The replay spec contract
+
+Every replay composition has one AI-editable spec beside the composition:
+`src/<name>/<name>.replay.json` or `.yaml`. This spec is the executable version
+of the storyboard. It owns:
+
+| field | owns |
+|---|---|
+| `viewport` | terminal/browser grid and output dimensions |
+| `capture` | fps, duration, output path, isolated home/profile, socket/session names |
+| `setup` | seed data shown before the recording starts |
+| `waits` | stable readiness markers and timeouts |
+| `text` | prompts, commands, captions typed on camera |
+| `flows` | named product flows such as `createTask` with field-walk timing |
+| `beats` | timed actions: type/key/wait/flow/sleep |
+| `regions` | named screen rectangles plus an auto-seeded, AI-editable coordinate hash |
+| `stages` | camera timeline: from/to/region, including dynamic `capture-end`/`end` |
+| `camera` | transition, fit, zoom clamp, row-gap, quantiles, tail hold |
+| `delivery` | speed cuts, poster frame, web delivery knobs |
+
+**AI edits the spec, not the engine.** `capture-*.ts`, the replay renderer, and
+the camera code should be generic interpreters of this spec. Change TS only when
+adding a new primitive/action/schema field or fixing a real engine bug. If a UI
+iteration changes timing, wording, regions, stages, or speed cuts, update the
+spec and re-run capture/render.
+
+Minimum implementation shape:
+- `replay-spec.ts` exports types, validation, dynamic region/time resolution,
+  and duration helpers.
+- `capture-*.ts` reads the spec, validates it, executes `beats`, and writes
+  `frames.json`.
+- The Remotion component reads the same spec to resolve `regions`, `stages`,
+  and `camera`.
+- `Root.tsx` derives composition size, duration, and speed-cut variants from
+  the spec.
+- Tests must cover at least dynamic `full`/`end` resolution and bad references
+  such as unknown `region`, `waitFor`, or `textRef`; also cover region hash
+  behavior (auto-generate when absent, preserve when AI edits it, reject
+  non-string hashes).
+
+Region hash rule: first generate `regions[*].hash` from `region name + capture
+size + c0/c1/r0/r1`; then leave it in the spec. AI may edit the hash as a
+self-eval marker ("I verified this still maps to composer after the UI change").
+The renderer should not depend on the hash for framing; it is a cheap stale
+coordinate signal and review affordance.
+
 ## Step 0 — content understanding (the single highest-leverage step)
 
 Both the storyboard and the camera derive from what the reference actually
@@ -60,17 +106,17 @@ ffmpeg -y -i <ref>.mp4 -vf fps=1 <dir>/s%02d.png
 ```
 
 `Read` the stills in order and write down the **storyboard table** — it is the
-single shared source that the capture beats, the camera `STAGES`, and any speed
-cut are all projections of. A complete row has:
+analysis source that becomes the replay spec. Capture beats, camera `stages`,
+regions, and speed cuts must be projections of the same table. A complete row has:
 
 | beat | ~when | user action (exact keys/inputs) | screen shows | subject pane/region | camera intent (wide/zoom) |
 |---|---|---|---|---|---|
 
-Grade your own pass: if a row's "user action" isn't concrete enough to type
-into the capture script verbatim, or "subject region" isn't concrete enough to
-become a `region` rect, the understanding pass isn't done. Keep the table in
-the composition's directory and update it when the reference or the beats
-change — capture, camera, and cut must never drift from it separately.
+Grade your own pass: if a row's "user action" isn't concrete enough to become a
+`beat`, or "subject region" isn't concrete enough to become a `region` rect, the
+understanding pass isn't done. Keep the table/spec in the composition's
+directory and update them when the reference or beats change — capture, camera,
+and cut must never drift from separate hand edits.
 
 Watch specifically for beats a shallow read collapses:
 - A real **modal/page/dialog** vs. a shortcut that produces the same end-state.
@@ -90,8 +136,10 @@ never touches the user's real data. For a TUI: an isolated tmux server
 with **wall-clock elapsed seconds** — NOT nominal frame indices; nominal time
 drifts and typing/spinners replay at the wrong speed.
 
-Interaction is a list of timed **beats**: `[atSecond, () => action]`. Fire them
-fire-and-forget so a slow beat never stalls the polling loop.
+Interaction is a list of timed **beats** in the replay spec: `at + action`.
+The capture script interprets generic primitives (`typeText`, `key`, `waitFor`,
+named `flow`, `sleep`). Fire them fire-and-forget so a slow beat never stalls
+the polling loop.
 
 Reusable gotchas (all cost us time at least once):
 - **`cd` into the Remotion package before running** — script + `frames.json`
@@ -128,8 +176,9 @@ Where the taste lives. These rules are the *result* of wrong turns — the commi
 history of the worked example shows each fix.
 
 **Model: storyboard stages, not per-frame tracking.** The demo is scripted, so
-the camera is too. A `STAGES` table of `{name, from, to, region?}` gives **one
-fixed shot per stage**, eased between stages (`TRANSITION` ≈ 1.2s, smoothstep).
+the camera is too. The spec's `stages` table of `{name, from, to, region?}`
+gives **one fixed shot per stage**, eased between stages (`camera.transition`
+≈ 1.2s, smoothstep).
 Per-frame "follow the motion" tracking was tried and **REJECTED — it twitches**:
 every keyframe spawns a new target and the camera chases between clusters. Do
 not reintroduce it.
@@ -157,11 +206,11 @@ never leaves the content**. `transform-origin` percentages were tried and
 A target near an edge sticks to that edge instead of cropping.
 
 **Tuning knobs (priority order when a stage looks wrong):**
-1. Wrong subject → fix the stage's `region` (most common fix).
-2. Too tight / loose → the `0.8` fit factor and `[1, 1.6]` clamp.
-3. Subject cut in half, or noise merged in → the `> 3` row-gap.
-4. Edge glyph stretching the box → the `0.05 / 0.95` column quantiles.
-5. Move feels abrupt → `TRANSITION` seconds / the easing.
+1. Wrong subject → fix the stage's `region` in the spec (most common fix).
+2. Too tight / loose → `camera.fit` and `camera.minScale/maxScale`.
+3. Subject cut in half, or noise merged in → `camera.rowGap`.
+4. Edge glyph stretching the box → `camera.colQuantiles`.
+5. Move feels abrupt → `camera.transitionSeconds` / the easing.
 
 ## Step 3 — speed cuts and delivery
 
@@ -179,8 +228,8 @@ composition takes a `speed` prop and decouples the two clocks:
   (`min(TRANSITION, stageOutputLen * 0.5)`) so short sped-up stages still
   *settle* on their subject instead of drifting through the whole stage.
 
-Register the cut as its own composition (`<id>-4x`, `defaultProps={{speed: 4}}`,
-duration = capture length / speed) so studio previews both.
+Register cuts from `delivery.speedCuts` (`<id>`, `<id>-4x`, etc.); duration is
+capture length / speed so studio previews every configured cut.
 
 Delivery checklist (a raw Remotion render is not a web asset):
 - Re-encode: `ffmpeg -i in.mp4 -c:v libx264 -crf 27 -preset slow -movflags
@@ -234,6 +283,8 @@ Delivery checklist (a raw Remotion render is not a web asset):
 | Web asset heavy / starts slowly | raw Remotion render shipped as-is | re-encode crf 27 + faststart; regenerate the poster |
 | Black bars / frame not filled | fallback font's advance ≠ cell width | bundle the app's font (e.g. @remotion/google-fonts) |
 | Camera frames chrome above the input while typing | input row outside the stage region | dedicated region for the composer rows (it may drift — widen) |
+| UI change forces editing capture/render TS | beats, regions, stages, or camera knobs live in engine code | move them into `<name>.replay.json`; engine reads spec |
+| AI "fixes the video" by hand-editing frames or TS constants | no declared editable surface | expose/validate replay spec and make it the only default edit target |
 
 ## Production checklist (before a capture replaces a shipped asset)
 
@@ -243,3 +294,5 @@ Delivery checklist (a raw Remotion render is not a web asset):
   auth warnings, promo banners, third-party interstitials).
 - Re-run analysis if the reference changed; keep the storyboard table in sync
   with the capture beats and the camera stages (all three share it).
+- Validate the replay spec before capture/render; bad refs (`region`, `waitFor`,
+  `textRef`) should fail before a long recording run starts.
